@@ -1,0 +1,7 @@
+---
+# defaults file for Dlrnapi
+db_username: dlrn
+db_password: test
+db_name: dlrn
+db_server: ''
+deploy_mariadb: true

@@ -1,0 +1,206 @@
+---
+- name: Set DLRNAPI DB path fact for operator-deployed DB
+  set_fact:
+    dbpath: "mysql+pymysql://{{ db_username }}:{{ db_password }}@{{ ansible_operator_meta.name }}-mariadb-dlrn-service/{{ db_name }}"
+    dlrn_db_sample: "yes"
+  when:
+    - deploy_mariadb
+
+- name: Set DLRNAPI DB path fact for external DB
+  set_fact:
+    dbpath: "mysql+pymysql://{{ db_username }}:{{ db_password }}@{{ db_server }}/{{ db_name }}"
+    dlrn_db_sample: ''
+  when:
+    - not deploy_mariadb
+
+- name: Create secret for deployment configuration
+  community.kubernetes.k8s:
+    state: present
+    wait: yes
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: 'secret-{{ ansible_operator_meta.name }}'
+        namespace: '{{ ansible_operator_meta.namespace }}'
+      type: Opaque
+      data:
+        mysql_user: "{{ db_username | b64encode }}"
+        mysql_password: "{{ db_password | b64encode }}"
+        mysql_root_password: "{{ db_password | b64encode }}"
+        mysql_database: "{{ db_name | b64encode }}"
+        dlrnapi_dbpath: "{{ dbpath | b64encode }}"
+
+- name: Create a Service for mariadb
+  community.kubernetes.k8s:
+    state: present
+    wait: yes
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: '{{ ansible_operator_meta.name }}-mariadb-dlrn-service'
+        namespace: '{{ ansible_operator_meta.namespace }}'
+        labels:
+          app: dlrnapi
+          service: dlrn
+      spec:
+        selector:
+          app: dlrnapi
+        ports:
+        - protocol: TCP
+          targetPort: 3306
+          name: mariadb-dlrn
+          port: 3306
+  when: deploy_mariadb
+
+- name: Create a Service for the DLRN API
+  community.kubernetes.k8s:
+    state: present
+    wait: yes
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: '{{ ansible_operator_meta.name }}-dlrnapi-service'
+        namespace: '{{ ansible_operator_meta.namespace }}'
+        labels:
+          app: dlrnapi
+          service: dlrn
+      spec:
+        selector:
+          app: dlrnapi
+        ports:
+        - protocol: TCP
+          targetPort: 5000
+          name: dlrnapi
+          port: 5000
+
+- name: start mariadb
+  community.kubernetes.k8s:
+    wait: yes
+    definition:
+      kind: Deployment
+      apiVersion: apps/v1
+      metadata:
+        name: 'mariadb-{{ ansible_operator_meta.name }}'
+        namespace: '{{ ansible_operator_meta.namespace }}'
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: dlrnapi
+        template:
+          metadata:
+            labels:
+              app: dlrnapi
+          spec:
+            volumes:
+              - name: mariadb-dlrn-data
+                emptyDir: {}
+            containers:
+              - name: mariadb
+                image: "docker.io/mariadb:10.3"
+                limits:
+                  memory: 512Mi
+                ports:
+                  - containerPort: 3306
+                    protocol: TCP
+                volumeMounts:
+                  - name: mariadb-dlrn-data
+                    mountPath: /var/lib/mysql
+                readinessProbe:
+                  exec:
+                    command:
+                      - /bin/sh
+                      - '-i'
+                      - '-c'
+                      - MYSQL_PWD="$MYSQL_PASSWORD" mysqladmin -u $MYSQL_USER ping
+                  initialDelaySeconds: 5
+                  timeoutSeconds: 1
+                  periodSeconds: 10
+                  successThreshold: 1
+                  failureThreshold: 3
+                terminationMessagePath: /dev/termination-log
+                env:
+                  - name: MYSQL_USER
+                    valueFrom:
+                      secretKeyRef:
+                        name: 'secret-{{ ansible_operator_meta.name }}'
+                        key: mysql_user
+                  - name: MYSQL_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: 'secret-{{ ansible_operator_meta.name }}'
+                        key: mysql_password
+                  - name: MYSQL_ROOT_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: 'secret-{{ ansible_operator_meta.name }}'
+                        key: mysql_root_password
+                  - name: MYSQL_DATABASE
+                    valueFrom:
+                      secretKeyRef:
+                        name: 'secret-{{ ansible_operator_meta.name }}'
+                        key: mysql_database
+  when: deploy_mariadb
+
+- name: start DLRN API
+  community.kubernetes.k8s:
+    definition:
+      kind: Deployment
+      apiVersion: apps/v1
+      metadata:
+        name: '{{ ansible_operator_meta.name }}-dlrnapi'
+        namespace: '{{ ansible_operator_meta.namespace }}'
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: dlrnapi
+        template:
+          metadata:
+            labels:
+              app: dlrnapi
+          spec:
+            volumes:
+              - name: dlrnapi-data
+                emptyDir: {}
+            containers:
+              - name: dlrnapi
+                image: "quay.io/javierpena/dlrnapi:latest"
+                limits:
+                  memory: 512Mi
+                ports:
+                  - containerPort: 5000
+                    protocol: TCP
+                volumeMounts:
+                  - name: dlrnapi-data
+                    mountPath: /data
+                env:
+                  - name: DLRNAPI_USE_SAMPLE_DATA
+                    value: '{{ dlrn_db_sample | string }}'
+                  - name: DLRNAPI_DBPATH
+                    valueFrom:
+                      secretKeyRef:
+                        name: 'secret-{{ ansible_operator_meta.name }}'
+                        key: dlrnapi_dbpath
+
+- name: Create route for the DLRN API
+  community.kubernetes.k8s:
+    definition:
+      kind: Route
+      apiVersion: v1
+      metadata:
+        name: '{{ ansible_operator_meta.name }}-dlrnapi-route'
+        namespace: '{{ ansible_operator_meta.namespace }}'
+        labels:
+          app: dlrnapi
+      spec:
+        to:
+          kind: Service
+          name: '{{ ansible_operator_meta.name }}-dlrnapi-service'
+          weight: 100
+        port:
+          targetPort: dlrnapi
+        wildcardPolicy: None

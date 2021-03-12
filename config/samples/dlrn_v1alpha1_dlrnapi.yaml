@@ -1,0 +1,10 @@
+apiVersion: dlrn.example.com/v1alpha1
+kind: Dlrnapi
+metadata:
+  name: dlrnapi-sample
+spec:
+  deploy_mariadb: True
+  db_username: 'dlrn'
+  db_password: 'test'
+  db_name: 'dlrn'
+  db_server: ''
